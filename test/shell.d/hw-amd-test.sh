@@ -63,3 +63,46 @@ assert_detects "a non-display AMD function is not a GPU" no
 
 write_pci_devices
 assert_detects "a machine with no PCI devices detects nothing" no
+
+# The menu picks the Ollama build from the detectors, so their order is part of
+# the fix: a hybrid laptop with an NVIDIA dGPU and an AMD iGPU wants CUDA. Run
+# the shipped action the way the menu does, with the real detectors on PATH and
+# the installer stubbed to report the package it was handed.
+ollama_action=$(node -e '
+  const fs = require("fs")
+  const path = require("path")
+  const menu = require(path.join(process.env.ROOT, "shell/plugins/menu/MenuModel.js"))
+  const items = menu.parseMenuJsonc(fs.readFileSync(path.join(process.env.ROOT, "default/omarchy/omarchy-menu.jsonc"), "utf8"))
+  process.stdout.write(items.find(item => item.id === "install.ai.ollama").action)
+')
+
+mkdir -p "$tmp_dir/bin"
+cat >"$tmp_dir/bin/omarchy-install-app" <<'SCRIPT'
+#!/bin/bash
+printf '%s\n' "$2"
+SCRIPT
+chmod +x "$tmp_dir/bin/omarchy-install-app"
+
+assert_ollama_package() {
+  local description="$1" expected="$2"
+
+  local actual
+  actual=$(OMARCHY_PCI_DEVICES_PATH="$tmp_dir/devices" PATH="$tmp_dir/bin:$ROOT/bin:$PATH" bash -c "$ollama_action")
+
+  [[ $actual == "$expected" ]] ||
+    fail "$description" "install.ai.ollama: expected $expected, got $actual"
+
+  pass "$description"
+}
+
+write_pci_devices 0x10de:0x1b80:0x030000
+assert_ollama_package "Ollama installs the CUDA build on an NVIDIA GPU" ollama-cuda
+
+write_pci_devices 0x1002:0x744c:0x030000
+assert_ollama_package "Ollama installs the ROCm build on an AMD GPU" ollama-rocm
+
+write_pci_devices 0x1002:0x15e7:0x030000 0x10de:0x2560:0x030200
+assert_ollama_package "Ollama installs the CUDA build on a hybrid laptop with an AMD iGPU" ollama-cuda
+
+write_pci_devices 0x8086:0x46a6:0x030000
+assert_ollama_package "Ollama installs the CPU build on an Intel-only machine" ollama
